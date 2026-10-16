@@ -2,7 +2,7 @@
 import { Octokit } from '@octokit/rest';
 import { google } from 'googleapis';
 import * as nodemailer from 'nodemailer';
-import { TriageResult } from '../ai/ai.service';
+import { TriageResult, PrdResult } from '../ai/ai.service';
 
 export interface GitHubIssueSummary {
   number: number;
@@ -114,6 +114,82 @@ ${triage.acceptanceCriteria.map((c) => `- [ ] ${c}`).join('\n')}
       });
 
       this.logger.log(`Real GitHub Issue created successfully: #${response.data.number} (${response.data.html_url})`);
+
+      return {
+        issueNumber: response.data.number,
+        issueUrl: response.data.html_url,
+        live: true,
+      };
+    }
+  }
+
+
+  async createGitHubPrd(prd: PrdResult) {
+    const body = `## 📋 Product Requirements Document (PRD)
+
+### 🎯 Problem Statement
+${prd.problemStatement}
+
+### 👥 Target Audience
+${prd.targetAudience}
+
+### ⏱️ Estimated Effort
+**${prd.estimatedEffort}**
+
+---
+
+### 🚀 User Stories & Acceptance Criteria
+${(prd.userStories || []).map((story, i) => `#### Story ${i + 1}: As a ${story.asA}
+- **I want:** ${story.iWant}
+- **So that:** ${story.soThat}
+
+**Acceptance Criteria:**
+${(story.acceptanceCriteria || []).map((ac) => `- [ ] ${ac}`).join('\n')}`).join('\n\n')}
+
+---
+
+### 🏗️ Technical Architecture & Design
+${prd.technicalArchitecture}
+
+### 🛡️ Non-Functional Requirements
+${(prd.nonFunctionalRequirements || []).map((nfr) => `- ${nfr}`).join('\n')}
+
+### 📈 Success Metrics (KPIs)
+${(prd.successMetrics || []).map((m) => `- ${m}`).join('\n')}
+
+---
+*Created autonomously by AI Technical Product Manager Agent*`;
+
+    const owner = this.getRepoOwner();
+    const repo = this.getRepoName();
+    const title = `[Feature Spec] ${prd.title}`;
+
+    try {
+      const response = await this.octokit.issues.create({
+        owner,
+        repo,
+        title,
+        body,
+        labels: ['enhancement', 'feature-spec', 'tpm-agent'],
+      });
+
+      this.logger.log(`Real GitHub Feature Spec created successfully: #${response.data.number} (${response.data.html_url})`);
+
+      return {
+        issueNumber: response.data.number,
+        issueUrl: response.data.html_url,
+        live: true,
+      };
+    } catch (error) {
+      this.logger.warn(`GitHub create PRD with labels failed (${error}), retrying without labels...`);
+      const response = await this.octokit.issues.create({
+        owner,
+        repo,
+        title,
+        body,
+      });
+
+      this.logger.log(`Real GitHub Feature Spec created successfully: #${response.data.number} (${response.data.html_url})`);
 
       return {
         issueNumber: response.data.number,

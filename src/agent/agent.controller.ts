@@ -59,6 +59,34 @@ export class AgentController {
     return record;
   }
 
+
+  // 1b. PRD Specification Endpoint: User submits raw feature idea or enterprise request
+  @Post('prd')
+  async generateFeaturePrd(@Body('input') input: string) {
+    if (!input || !input.trim()) {
+      return { error: 'Feature input cannot be empty' };
+    }
+
+    this.logger.log(`Generating Feature PRD: "${input.substring(0, 80)}..."`);
+
+    // Step 1: Gemini structures comprehensive PRD
+    const prd = await this.aiService.generatePrd(input);
+
+    // Step 2: Create real GitHub Feature Spec Issue
+    const githubIssue = await this.integrationsService.createGitHubPrd(prd);
+
+    const record = {
+      id: Date.now(),
+      timestamp: new Date().toISOString(),
+      type: 'FEATURE_PRD',
+      prd,
+      githubIssue,
+    };
+
+    this.activityLog.unshift(record);
+    return record;
+  }
+
   // 2. Proactive Endpoint: Triggered daily by GCP Cloud Scheduler
   @Post('cron/daily-digest')
   async triggerDailySprintDigest() {

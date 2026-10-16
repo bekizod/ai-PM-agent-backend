@@ -1,4 +1,4 @@
-﻿import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { GoogleGenAI, Type } from '@google/genai';
 
 export interface TriageResult {
@@ -10,6 +10,27 @@ export interface TriageResult {
   labels: string[];
   requiresUrgentMeeting: boolean;
   suggestedMeetingTopic?: string;
+  isSimulated?: boolean;
+}
+
+export interface UserStory {
+  asA: string;
+  iWant: string;
+  soThat: string;
+  acceptanceCriteria: string[];
+}
+
+export interface PrdResult {
+  title: string;
+  targetAudience: string;
+  problemStatement: string;
+  userStories: UserStory[];
+  technicalArchitecture: string;
+  nonFunctionalRequirements: string[];
+  successMetrics: string[];
+  estimatedEffort: 'Small (1-2 days)' | 'Medium (1 week)' | 'Large (2-3 weeks)' | 'X-Large (> 1 month)';
+  recommendedLabels: string[];
+  markdownPrd: string;
   isSimulated?: boolean;
 }
 
@@ -92,8 +113,89 @@ ${rawInput}`,
       }
     }
 
-    // Heuristic Fallback for local testing/demo without valid API key
     return this.fallbackTriage(rawInput);
+  }
+
+  async generatePrd(rawInput: string): Promise<PrdResult> {
+    if (this.ai) {
+      try {
+        const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+        const response = await this.ai.models.generateContent({
+          model: modelName,
+          contents: `You are a Principal Technical Product Manager at a B2B SaaS company.
+Transform the following feature request or customer proposal into an engineering-ready Product Requirements Document (PRD).
+Ensure clear user stories with testable acceptance criteria, technical architectural requirements, and measurable KPIs.
+
+Feature Request / Idea:
+${rawInput}`,
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                title: { type: Type.STRING },
+                targetAudience: { type: Type.STRING },
+                problemStatement: { type: Type.STRING },
+                userStories: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      asA: { type: Type.STRING },
+                      iWant: { type: Type.STRING },
+                      soThat: { type: Type.STRING },
+                      acceptanceCriteria: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                      },
+                    },
+                    required: ['asA', 'iWant', 'soThat', 'acceptanceCriteria'],
+                  },
+                },
+                technicalArchitecture: { type: Type.STRING },
+                nonFunctionalRequirements: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                },
+                successMetrics: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                },
+                estimatedEffort: {
+                  type: Type.STRING,
+                  enum: ['Small (1-2 days)', 'Medium (1 week)', 'Large (2-3 weeks)', 'X-Large (> 1 month)'],
+                },
+                recommendedLabels: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                },
+                markdownPrd: { type: Type.STRING },
+              },
+              required: [
+                'title',
+                'targetAudience',
+                'problemStatement',
+                'userStories',
+                'technicalArchitecture',
+                'nonFunctionalRequirements',
+                'successMetrics',
+                'estimatedEffort',
+                'recommendedLabels',
+                'markdownPrd',
+              ],
+            },
+          },
+        });
+
+        const parsed = JSON.parse(response.text || '{}') as PrdResult;
+        parsed.isSimulated = false;
+        return parsed;
+      } catch (error) {
+        this.logger.error(`Error during Gemini PRD generation, falling back: ${error}`);
+      }
+    }
+
+    return this.fallbackPrd(rawInput);
   }
 
   async generateDailySprintDigest(issues: any[]): Promise<string> {
@@ -118,24 +220,23 @@ ${JSON.stringify(issues, null, 2)}`,
       }
     }
 
-    // Fallback digest
     const p0Count = issues.filter(i => (i.labels || []).includes('P0') || (i.title || '').includes('P0')).length;
     const p1Count = issues.filter(i => (i.labels || []).includes('P1') || (i.title || '').includes('P1')).length;
 
-    return `## 🚀 AI TPM Daily Sprint Standup Digest (${new Date().toLocaleDateString()})
+    return `## Daily Sprint Standup Digest (${new Date().toLocaleDateString()})
 
-### ⚠️ Executive Summary
+### Executive Summary
 - Total Open Issues: **${issues.length}**
 - Critical Blockers (P0): **${p0Count}**
 - High Priority (P1): **${p1Count}**
 - Backlog Health: **${p0Count > 0 ? 'CRITICAL ATTENTION REQUIRED' : 'STABLE & ON TRACK'}**
 
-### 🎯 Key Focus Areas Today
+### Key Focus Areas Today
 1. **P0 Outage Mitigation**: Immediate focus on unblocking database and payment webhook timeouts.
 2. **Review Open PRs**: Expedite code reviews for pending bug fixes.
 3. **Sprint Velocity**: 4 tickets completed in previous cycle, 2 currently in QA testing.
 
-### 📋 Top Open Issues
+### Top Open Issues
 ${issues.slice(0, 5).map((i, idx) => `${idx + 1}. **#${i.number || idx + 1}**: ${i.title} (${(i.labels || []).join(', ') || 'unlabeled'})`).join('\n')}
 
 *Generated automatically by Autonomous AI Technical Product Manager Agent*`;
@@ -178,6 +279,53 @@ ${issues.slice(0, 5).map((i, idx) => `${idx + 1}. **#${i.number || idx + 1}**: $
       labels: ['bug', severity, isP0 ? 'critical-blocker' : 'standard-triage', 'tpm-agent-triaged'],
       requiresUrgentMeeting: severity === 'P0',
       suggestedMeetingTopic: severity === 'P0' ? `Emergency Incident Triage: ${title}` : undefined,
+      isSimulated: true,
+    };
+  }
+
+  private fallbackPrd(rawInput: string): PrdResult {
+    const words = rawInput.trim().split(/\s+/).slice(0, 7).join(' ');
+    const title = words.length > 5 ? words.replace(/[^\w\s-]/gi, '') : 'Enterprise Feature Specification';
+
+    return {
+      title,
+      targetAudience: 'Enterprise IT Administrators & Operations Teams',
+      problemStatement: rawInput.trim(),
+      userStories: [
+        {
+          asA: 'Tenant Administrator',
+          iWant: `seamless configuration of ${title}`,
+          soThat: 'our organization can securely scale workflows without manual intervention.',
+          acceptanceCriteria: [
+            'Administrative UI provides clear status indicators and validation errors.',
+            'Audit log records every configuration modification with user identity and timestamp.',
+            'Changes propagate across distributed services in under 5 seconds.',
+          ],
+        },
+        {
+          asA: 'End User',
+          iWant: 'transparent access without authentication friction',
+          soThat: 'I can complete mission-critical tasks without disruption.',
+          acceptanceCriteria: [
+            'End user authentication latency remains under 200ms at p95.',
+            'Graceful fallback message displayed if service provider is unreachable.',
+          ],
+        },
+      ],
+      technicalArchitecture: 'Microservices event-driven architecture using Kafka/RabbitMQ message queues with PostgreSQL for persistence and Redis caching layer. REST and GraphQL API gateways protected by OAuth2/OIDC.',
+      nonFunctionalRequirements: [
+        'High availability: 99.95% uptime SLA.',
+        'Latency: API response time < 150ms at p95.',
+        'Security: Full SOC2 Type II compliance with AES-256 data encryption at rest and in transit.',
+      ],
+      successMetrics: [
+        '80%+ adoption among enterprise tier accounts within 60 days of GA.',
+        'Zero high-severity vulnerability findings in third-party penetration testing.',
+        'Reduction of related manual IT support tickets by 50%.',
+      ],
+      estimatedEffort: 'Large (2-3 weeks)',
+      recommendedLabels: ['enhancement', 'feature-spec', 'enterprise', 'tpm-agent'],
+      markdownPrd: `# PRD: ${title}\n\n## Problem Statement\n${rawInput.trim()}\n\n## Target Audience\nEnterprise IT Administrators\n\n## Estimated Effort\nLarge (2-3 weeks)`,
       isSimulated: true,
     };
   }
