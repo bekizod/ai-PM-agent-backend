@@ -1,3 +1,4 @@
+import { marked } from 'marked';
 ﻿import { Injectable, Logger } from '@nestjs/common';
 import { Octokit } from '@octokit/rest';
 import { google } from 'googleapis';
@@ -283,14 +284,27 @@ ${(prd.successMetrics || []).map((m) => `- ${m}`).join('\n')}
     const toEmail = process.env.NOTIFICATION_EMAIL_TO || 'bekizodcancer@gmail.com';
     const fromEmail = process.env.NOTIFICATION_EMAIL_FROM || process.env.SMTP_USER || 'eshetugetsh19@gmail.com';
 
+    // Parse Markdown into rich, clean HTML for email clients
+    const rawParsed = marked.parse(content);
+    const parsedHtml = (typeof rawParsed === 'string' ? rawParsed : '')
+      .replace(/<h2>/g, '<h2 style="font-size: 16px; font-weight: 700; color: #0f172a; margin: 18px 0 8px 0; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px;">')
+      .replace(/<h3>/g, '<h3 style="font-size: 14px; font-weight: 700; color: #4338ca; margin: 14px 0 6px 0;">')
+      .replace(/<p>/g, '<p style="margin: 0 0 10px 0; line-height: 1.6; color: #334155; font-size: 13px;">')
+      .replace(/<strong>/g, '<strong style="color: #0f172a; font-weight: 600;">')
+      .replace(/<ol>/g, '<ol style="margin: 8px 0 14px 20px; padding: 0; color: #334155; font-size: 13px; line-height: 1.6;">')
+      .replace(/<ul>/g, '<ul style="margin: 6px 0 10px 20px; padding: 0; color: #334155; font-size: 13px; line-height: 1.6;">')
+      .replace(/<li>/g, '<li style="margin-bottom: 4px; line-height: 1.5;">')
+      .replace(/<hr>/g, '<hr style="border: none; border-top: 1px solid #e2e8f0; margin: 16px 0;" />')
+      .replace(/<code>/g, '<code style="background-color: #f1f5f9; padding: 2px 5px; border-radius: 4px; font-family: monospace; font-size: 12px; color: #0f172a;">');
+
     const htmlContent = `
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 650px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff;">
         <div style="border-bottom: 2px solid #4f46e5; padding-bottom: 12px; margin-bottom: 20px;">
-          <h2 style="color: #0f172a; margin: 0; font-size: 20px; font-weight: 700;">${subject}</h2>
-          <p style="color: #64748b; font-size: 13px; margin: 4px 0 0 0;">Autonomous AI Technical Product Manager • Real-Time Notification</p>
+          <h2 style="color: #0f172a; margin: 0; font-size: 18px; font-weight: 700;">${subject}</h2>
+          <p style="color: #64748b; font-size: 12px; margin: 4px 0 0 0;">Autonomous AI Technical Product Manager • Real-Time Notification</p>
         </div>
-        <div style="background-color: #f8fafc; padding: 16px; border-radius: 8px; border-left: 4px solid #4f46e5; margin-bottom: 20px;">
-          <pre style="white-space: pre-wrap; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; font-size: 13px; color: #334155; line-height: 1.6; margin: 0;">${content}</pre>
+        <div style="background-color: #f8fafc; padding: 20px; border-radius: 8px; border-left: 4px solid #4f46e5; margin-bottom: 20px; font-size: 13px; color: #334155; line-height: 1.6;">
+          ${parsedHtml}
         </div>
         <div style="font-size: 11px; color: #94a3b8; text-align: center; border-top: 1px solid #e2e8f0; padding-top: 12px;">
           Dispatched live via Nodemailer Gmail SMTP to ${toEmail}
