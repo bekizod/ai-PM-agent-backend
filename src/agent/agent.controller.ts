@@ -51,19 +51,24 @@ export class AgentController {
 
     if (isPrd) {
       const title = issue.title.replace(/^\[Feature Spec\]\s*/i, '');
-      const probMatch = body.match(/### 🎯 Problem Statement\s*\n([\s\S]*?)(?=\n###|\n---|$)/i);
-      const audMatch = body.match(/### 👥 Target Audience\s*\n([\s\S]*?)(?=\n###|\n---|$)/i);
-      const effMatch = body.match(/### ⏱️ Estimated Effort\s*\n\**([\s\S]*?)\**(?=\n###|\n---|$)/i);
-      const archMatch = body.match(/### 🏗️ Technical Architecture[\s\S]*?\n([\s\S]*?)(?=\n###|\n---|$)/i);
+      const probMatch =
+        body.match(/###(?:\s*🎯)?\s*(?:Feature\s+)?Problem\s+Statement\s*\n([\s\S]*?)(?=\n###|\n---|\n\n--|$)/i);
+      const audMatch =
+        body.match(/###(?:\s*👥)?\s*Target\s+Audience\s*\n([\s\S]*?)(?=\n###|\n---|\n\n--|$)/i);
+      const effMatch =
+        body.match(/###(?:\s*⏱️)?\s*Estimated\s+Effort\s*\n\**([\s\S]*?)\**(?=\n###|\n---|\n\n--|$)/i);
+      const archMatch =
+        body.match(/###(?:\s*🏗️)?\s*Technical\s+Architecture[\s\S]*?\n([\s\S]*?)(?=\n###|\n---|\n\n--|$)/i);
 
       return {
         id: issue.number * 1000,
         timestamp: issue.createdAt,
         type: 'FEATURE_PRD',
+        rawBody: body,
         prd: {
           title,
           targetAudience: audMatch ? audMatch[1].trim() : 'Enterprise IT & Developers',
-          problemStatement: probMatch ? probMatch[1].trim() : body.slice(0, 300) || title,
+          problemStatement: probMatch ? probMatch[1].trim() : body.slice(0, 500) || title,
           userStories: [
             {
               asA: 'Product User',
@@ -105,10 +110,38 @@ export class AgentController {
     } else {
       const sevMatch = issue.title.match(/\[(P[0-3])\]/i) || labels.find((l) => /^P[0-3]$/i.test(l));
       const severity = (Array.isArray(sevMatch) ? sevMatch[1] : sevMatch || 'P2').toUpperCase();
-      const title = issue.title.replace(/^\[P[0-3]\]\s*/i, '');
-      const sumMatch = body.match(/### Summary\s*\n([\s\S]*?)(?=\n###|\n---|$)/i);
-      const stepsMatch = body.match(/### Steps to Reproduce\s*\n([\s\S]*?)(?=\n###|\n---|$)/i);
-      const critMatch = body.match(/### Acceptance Criteria\s*\n([\s\S]*?)(?=\n###|\n---|$)/i);
+      let title = issue.title.replace(/^\[P[0-3]\]\s*/i, '');
+
+      const sumMatch = body.match(/###\s*(?:Problem\s+)?Summary\s*\n([\s\S]*?)(?=\n###|\n---|\n\n--|$)/i);
+      const stepsMatch = body.match(/###\s*Steps\s+to\s+Reproduce\s*\n([\s\S]*?)(?=\n###|\n---|\n\n--|$)/i);
+      const critMatch = body.match(/###\s*Acceptance\s+Criteria\s*\n([\s\S]*?)(?=\n###|\n---|\n\n--|$)/i);
+      const actionsMatch = body.match(/###\s*Autonomous\s+Actions\s+Taken\s*\n([\s\S]*?)(?=\n###|\n---|\n\n--|$)/i);
+
+      let summaryText = '';
+      if (sumMatch) {
+        summaryText = sumMatch[1].trim();
+      } else {
+        summaryText = body.replace(/^##\s+.*\n+/g, '').replace(/###\s+.*\n+/g, '').trim();
+        if (!summaryText) summaryText = title;
+      }
+
+      let parsedJsonPayload: any = null;
+      try {
+        if (summaryText.startsWith('{') && summaryText.endsWith('}')) {
+          const parsed = JSON.parse(summaryText);
+          parsedJsonPayload = parsed;
+          if (parsed.payload?.message) {
+            summaryText = parsed.payload.message;
+            if (title.includes('{') || title.length > 50) {
+              title = parsed.payload.message.slice(0, 70);
+            }
+          } else if (parsed.message) {
+            summaryText = parsed.message;
+          }
+        }
+      } catch (e) {
+        // Not valid JSON, keep as-is
+      }
 
       const reproductionSteps = stepsMatch
         ? stepsMatch[1].split('\n').map((s) => s.replace(/^\d+\.\s*/, '').trim()).filter(Boolean)
@@ -118,20 +151,28 @@ export class AgentController {
         ? critMatch[1].split('\n').map((c) => c.replace(/^-\s*\[\s*\]\s*/, '').trim()).filter(Boolean)
         : ['Fix root cause and add regression integration test.'];
 
+      const actionsTaken = actionsMatch
+        ? actionsMatch[1].split('\n').map((a) => a.replace(/^-\s*\[[x ]\]\s*/i, '').trim()).filter(Boolean)
+        : [];
+
       const isP0 = severity === 'P0';
 
       return {
         id: issue.number * 1000,
         timestamp: issue.createdAt,
         type: 'REACTIVE_TRIAGE',
+        rawBody: body,
         triage: {
           title,
-          summary: sumMatch ? sumMatch[1].trim() : body.slice(0, 300) || title,
+          summary: summaryText,
           severity,
           reproductionSteps,
           acceptanceCriteria,
+          actionsTaken,
+          parsedJsonPayload,
           labels,
           requiresUrgentMeeting: isP0,
+          rawBody: body,
         },
         blastRadius: {
           affectedServices: isP0 ? ['billing-gateway', 'payment-worker', 'tenant-authorizer'] : ['core-service'],
@@ -158,15 +199,22 @@ export class AgentController {
 
   // 1. Reactive Endpoint: Multi-Agent Triage Pipeline
   @Post('triage')
-  async triageAndAutomate(@Body('input') input: string) {
-    if (!input || !input.trim()) {
+  async triageAndAutomate(
+    @Body('input') input?: string,
+    @Body('rawLog') rawLog?: string,
+    @Body('text') text?: string,
+    @Body() body?: any,
+  ) {
+    const rawInput = input || rawLog || text || body?.input || body?.rawLog || body?.text || (typeof body === 'string' ? body : '');
+    if (!rawInput || !rawInput.trim()) {
       return { error: 'Input cannot be empty' };
     }
+    const safeInput: string = rawInput.trim();
 
-    this.logger.log(`Processing multi-agent triage: "${input.substring(0, 80)}..."`);
+    this.logger.log(`Processing multi-agent triage: "${safeInput.substring(0, 80)}..."`);
 
     const existingIssues = await this.integrationsService.getOpenGitHubIssues();
-    const multiAgent = await this.aiService.runMultiAgentTriage(input, existingIssues);
+    const multiAgent = await this.aiService.runMultiAgentTriage(safeInput, existingIssues);
     const triage = multiAgent.triage;
 
     // Create real GitHub issue
@@ -207,14 +255,21 @@ export class AgentController {
 
   // 1b. PRD Specification Endpoint: User submits raw feature idea or enterprise request
   @Post('prd')
-  async generateFeaturePrd(@Body('input') input: string) {
-    if (!input || !input.trim()) {
+  async generateFeaturePrd(
+    @Body('input') input?: string,
+    @Body('featureDescription') featureDescription?: string,
+    @Body('text') text?: string,
+    @Body() body?: any,
+  ) {
+    const rawInput = input || featureDescription || text || body?.input || body?.featureDescription || body?.text || (typeof body === 'string' ? body : '');
+    if (!rawInput || !rawInput.trim()) {
       return { error: 'Feature input cannot be empty' };
     }
+    const safeInput: string = rawInput.trim();
 
-    this.logger.log(`Generating Feature PRD: "${input.substring(0, 80)}..."`);
+    this.logger.log(`Generating Feature PRD: "${safeInput.substring(0, 80)}..."`);
 
-    const prd = await this.aiService.generatePrd(input);
+    const prd = await this.aiService.generatePrd(safeInput);
     const githubIssue = await this.integrationsService.createGitHubPrd(prd);
 
     const record = {
@@ -468,6 +523,7 @@ ${scaffold.technicalTradeoffs}
     return {
       success: true,
       issueNumber: num,
+      ...postMortem,
       postMortem,
       comment: commentResult,
     };
@@ -477,9 +533,10 @@ ${scaffold.technicalTradeoffs}
   @Post('release-notes')
   async generateSprintReleaseNotes(
     @Body('version') version?: string,
+    @Body('versionTag') versionTag?: string,
     @Body('publishToGitHub') publishToGitHub?: boolean,
   ) {
-    const targetVersion = version || '1.4.0';
+    const targetVersion = (version || versionTag || '1.4.0').replace(/^v/, '');
     this.logger.log(`Generating sprint release notes for v${targetVersion}...`);
 
     const openIssues = await this.integrationsService.getOpenGitHubIssues();
@@ -496,8 +553,35 @@ ${scaffold.technicalTradeoffs}
 
     return {
       success: true,
+      ...releaseNotes,
       releaseNotes,
       gitHubRelease,
+    };
+  }
+
+  // 8b. Publish Release Draft to GitHub
+  @Post('release-notes/publish')
+  async publishReleaseNotesDraft(
+    @Body('version') version?: string,
+    @Body('versionTag') versionTag?: string,
+    @Body('title') title?: string,
+    @Body('notesMarkdown') notesMarkdown?: string,
+  ) {
+    const targetVersion = (version || versionTag || '1.4.0').replace(/^v/, '');
+    const releaseTitle = title || `Sprint Release v${targetVersion}`;
+    const changelog = notesMarkdown || `Automated release notes for v${targetVersion}`;
+
+    const gitHubRelease = await this.integrationsService.createGitHubRelease(
+      targetVersion,
+      releaseTitle,
+      changelog,
+    );
+
+    return {
+      success: true,
+      gitHubRelease,
+      releaseUrl: gitHubRelease.releaseUrl,
+      releaseTag: gitHubRelease.tagName, tagName: gitHubRelease.tagName,
     };
   }
 
@@ -534,6 +618,7 @@ ${scaffold.technicalTradeoffs}
     return {
       success: true,
       issueNumber: num,
+      ...communications,
       communications,
       emailResult,
     };
@@ -545,17 +630,43 @@ ${scaffold.technicalTradeoffs}
     this.logger.log(`TPM Copilot Query: "${prompt}"`);
     const openIssues = await this.integrationsService.getOpenGitHubIssues();
     const p0s = openIssues.filter((i) => (i.labels || []).includes("P0") || (i.title || "").includes("[P0]"));
+
+    let topMember: any = null;
+    let totalSprintPoints = 0;
+    try {
+      const cap = await this.getTeamCapacity();
+      const members = cap.capacityPlan?.members || [];
+      totalSprintPoints = cap.capacityPlan?.totalSprintPoints || 0;
+      const sorted = [...members].sort((a, b) => (b.storyPoints || 0) - (a.storyPoints || 0));
+      if (sorted[0]) {
+        topMember = {
+          name: sorted[0].name,
+          storyPoints: sorted[0].storyPoints,
+          capacityPercentage: sorted[0].capacityPercentage,
+          issuesCount: sorted[0].assignedIssuesCount || sorted[0].assignedIssues?.length || 0,
+        };
+      }
+    } catch (e) {
+      // Fallback context
+    }
+
     const sprintContext = {
       openIssuesCount: openIssues.length,
       p0Count: p0s.length,
       p0Titles: p0s.map((p) => p.title),
       topIssues: openIssues.slice(0, 5).map((i) => ({ number: i.number, title: i.title })),
+      totalSprintPoints,
+      topMember,
     };
 
     const result = await this.aiService.queryTpmCopilot(prompt, sprintContext);
     return {
       success: true,
       ...result,
+      reply: result.reply,
+      answer: result.reply,
+      response: result.reply,
+      suggestedFollowUps: result.suggestedFollowUps,
     };
   }
 
@@ -565,8 +676,11 @@ ${scaffold.technicalTradeoffs}
     const openIssues = await this.integrationsService.getOpenGitHubIssues();
     const collaborators = await this.integrationsService.getRepoCollaborators();
 
-    // Sync all real GitHub collaborators from the repository
+    // Sync all real GitHub collaborators from the repository (excluding deleted ones)
     collaborators.forEach((collab) => {
+      if (this.removedMemberUsernames.has(collab.username.toLowerCase())) {
+        return;
+      }
       const existing = this.liveTeamMembers.find(
         (m) => m.githubUsername.toLowerCase() === collab.username.toLowerCase(),
       );
@@ -698,6 +812,9 @@ ${scaffold.technicalTradeoffs}
       primaryComponent: primaryComponent || 'Core Services',
     };
 
+    if (cleanUsername) {
+      this.removedMemberUsernames.delete(cleanUsername.toLowerCase());
+    }
     this.liveTeamMembers.push(newMember);
 
     // Automatically send an official GitHub collaborator invite directly from the dashboard!
@@ -743,10 +860,31 @@ ${scaffold.technicalTradeoffs}
     };
   }
 
+  // Track deleted collaborators so getTeamCapacity does not resurrect them
+  private removedMemberUsernames = new Set<string>();
+
   // 11c. Team Member Management: Remove Member
   @Delete('team/members/:id')
-  removeTeamMember(@Param('id') memberId: string) {
+  async removeTeamMember(@Param('id') memberId: string) {
+    const target = this.liveTeamMembers.find(m => m.id === memberId);
+    if (target?.githubUsername) {
+      this.removedMemberUsernames.add(target.githubUsername.toLowerCase());
+      try {
+        await this.integrationsService.removeRepoCollaborator(target.githubUsername);
+      } catch (err) {
+        this.logger.warn(`Could not remove ${target.githubUsername} from GitHub: ${err}`);
+      }
+    }
     this.liveTeamMembers = this.liveTeamMembers.filter(m => m.id !== memberId);
+
+    // Unassign issues from removed member
+    Object.keys(this.issueAssignments).forEach((numStr) => {
+      const num = parseInt(numStr, 10);
+      if (this.issueAssignments[num] === memberId) {
+        delete this.issueAssignments[num];
+      }
+    });
+
     return { success: true, totalMembers: this.liveTeamMembers.length };
   }
 
@@ -810,29 +948,53 @@ ${scaffold.technicalTradeoffs}
   // 11e. Autonomous Workload Rebalancer: Auto-reassign issues to level out capacity
   @Post('team/rebalance')
   async autoRebalanceWorkload() {
-    const openIssues = await this.integrationsService.getOpenGitHubIssues();
     const capacityRes = await this.getTeamCapacity();
-    const members = capacityRes.capacityPlan.members;
-
-    const overloaded = members.filter(m => m.isOverloaded);
-    const underloaded = members.filter(m => m.capacityPercentage < 80);
+    const members = capacityRes.capacityPlan?.members || [];
 
     let rebalancedCount = 0;
-    for (const over of overloaded) {
-      if (over.assignedIssues.length > 1) {
-        const issueToMove = over.assignedIssues[over.assignedIssues.length - 1];
-        const target = underloaded.find(u => u.id !== over.id);
-        if (target && issueToMove) {
-          this.issueAssignments[issueToMove.number] = target.id;
+
+    if (members.length > 1) {
+      // Sort members by utilization percentage ascending (least loaded first)
+      const sorted = [...members].sort((a, b) => a.capacityPercentage - b.capacityPercentage);
+      const leastLoaded = sorted[0];
+      const mostLoaded = sorted[sorted.length - 1];
+
+      // If load disparity is > 10%, transfer a ticket from most loaded to least loaded
+      if (
+        mostLoaded &&
+        leastLoaded &&
+        mostLoaded.id !== leastLoaded.id &&
+        mostLoaded.capacityPercentage - leastLoaded.capacityPercentage > 10 &&
+        mostLoaded.assignedIssues.length > 1
+      ) {
+        const issueToMove = mostLoaded.assignedIssues[mostLoaded.assignedIssues.length - 1];
+        if (issueToMove) {
+          this.issueAssignments[issueToMove.number] = leastLoaded.id;
           rebalancedCount++;
+        }
+      } else {
+        // Fallback: Check overloaded members
+        const overloaded = members.filter(m => m.isOverloaded);
+        const underloaded = members.filter(m => m.capacityPercentage < 100);
+        for (const over of overloaded) {
+          if (over.assignedIssues.length > 1) {
+            const issueToMove = over.assignedIssues[over.assignedIssues.length - 1];
+            const target = underloaded.find(u => u.id !== over.id);
+            if (target && issueToMove) {
+              this.issueAssignments[issueToMove.number] = target.id;
+              rebalancedCount++;
+            }
+          }
         }
       }
     }
 
+    const updatedCapacity = await this.getTeamCapacity();
     return {
       success: true,
       rebalancedCount,
-      updatedCapacity: await this.getTeamCapacity(),
+      updatedCapacity,
+      capacityPlan: updatedCapacity.capacityPlan,
     };
   }
 
@@ -849,6 +1011,7 @@ ${scaffold.technicalTradeoffs}
     return {
       success: true,
       issueNumber: num,
+      ...report,
       report,
     };
   }
@@ -912,9 +1075,14 @@ ${scaffold.technicalTradeoffs}
     );
 
     for (const issue of openIssues) {
-      if (!existingIssueNumbers.has(issue.number)) {
-        this.activityLog.push(this.parseIssueToActivity(issue));
-        existingIssueNumbers.add(issue.number);
+      const existing = this.activityLog.find((a) => a.githubIssue?.issueNumber === issue.number);
+      const parsed = this.parseIssueToActivity(issue);
+      if (existing) {
+        existing.triage = parsed.triage;
+        existing.prd = parsed.prd;
+        existing.rawBody = parsed.rawBody;
+      } else {
+        this.activityLog.push(parsed);
       }
     }
 
@@ -925,6 +1093,183 @@ ${scaffold.technicalTradeoffs}
       openIssues,
       activityLog: this.activityLog,
       configStatus,
+    };
+  }
+
+  @Get('issues')
+  async getIssues() {
+    return this.integrationsService.getOpenGitHubIssues();
+  }
+
+  @Get('activity')
+  async getActivity() {
+    const status = await this.getDashboardStatus();
+    return status.activityLog;
+  }
+
+  @Post('standup')
+  async runStandup() {
+    return this.triggerDailySprintDigest();
+  }
+
+
+  // Flat Route: Reassign Issue to Member (called by page.tsx handleAssignIssue)
+  @Post('team/assign')
+  async assignTeamIssue(
+    @Body('issueNumber') issueNumber: number | string,
+    @Body('memberId') memberId: string,
+    @Body('syncToGitHub') syncToGitHub?: boolean,
+  ) {
+    return this.assignIssueToMember(String(issueNumber), memberId, syncToGitHub);
+  }
+
+  // Flat Route: Generate Code Fix & Test Scaffold (called by page.tsx handleOpenCodeFixModal)
+  @Post('fix-scaffold')
+  async getCodeFixScaffold(
+    @Body('title') title: string,
+    @Body('summary') summary?: string,
+    @Body('issueNumber') issueNumber?: number,
+  ) {
+    const scaffold = await this.aiService.generateCodeFixAndTest(title || 'Bug Fix', summary || '');
+    return {
+      success: true,
+      issueNumber: Number(issueNumber) || 0,
+      scaffold,
+      reproductionTestCode: scaffold.reproductionTestCode,
+      proposedFixDiff: scaffold.proposedFixDiff,
+      filesToModify: scaffold.filesToModify,
+      technicalTradeoffs: scaffold.technicalTradeoffs,
+      testFramework: scaffold.testFramework,
+    };
+  }
+
+  // Flat Route: Generate Outage Communications (called by page.tsx handleOpenOutageComms)
+  @Post('outage-comms')
+  async getOutageCommunications(
+    @Body('incidentTitle') incidentTitle?: string,
+    @Body('title') title?: string,
+    @Body('severity') severity?: string,
+    @Body('issueNumber') issueNumber?: number,
+  ) {
+    const targetTitle = incidentTitle || title || 'Critical Outage Incident';
+    const comms = await this.aiService.generateOutageCommunications(
+      targetTitle,
+      '',
+      severity || 'P0',
+    );
+    return {
+      success: true,
+      ...comms,
+      communications: comms,
+    };
+  }
+
+  // Flat Route: Dispatch Executive Outage Email (called by page.tsx handleDispatchExecEmail)
+  @Post('outage-comms/dispatch')
+  async dispatchOutageEmail(
+    @Body('recipient') recipient: string,
+    @Body('subject') subject: string,
+    @Body('body') body: string,
+  ) {
+    const to = recipient || process.env.NOTIFICATION_EMAIL_TO || 'bekizodcancer@gmail.com';
+    const emailResult = await this.integrationsService.sendEmailNotification(
+      subject || '🚨 [Outage Escalation]',
+      body || 'Automated outage notification',
+      to,
+    );
+    return {
+      success: true,
+      emailResult,
+    };
+  }
+
+  // Flat Route: Autonomous Pull Request Generator (called by page.tsx handleCreateAutonomousPR)
+  @Post('create-pr')
+  async createPullRequestDirect(
+    @Body('issueNumber') issueNumber: number | string,
+    @Body('title') title: string,
+    @Body('patchContent') patchContent?: string,
+    @Body('testScaffold') testScaffold?: string,
+  ) {
+    return this.createIssuePullRequest(String(issueNumber), title, '', patchContent, testScaffold);
+  }
+
+  // Flat Route: Blameless Post-Mortem Generator (called by page.tsx handleOpenWarRoomModal)
+  @Post('post-mortem')
+  async generatePostMortemDirect(
+    @Body('issueNumber') issueNumber?: number | string,
+    @Body('title') title?: string,
+    @Body('severity') severity?: string,
+    @Body('body') body?: string,
+  ) {
+    const num = issueNumber ? String(issueNumber) : '1';
+    return this.generateIssuePostMortem(num, title || 'Incident', body || '', severity);
+  }
+
+  // Flat Route: Security & SOC2 Compliance Audit (called by page.tsx handleOpenComplianceModal)
+  @Post('compliance-audit')
+  async runComplianceAuditDirect(
+    @Body('issueNumber') issueNumber?: number | string,
+    @Body('title') title?: string,
+    @Body('body') body?: string,
+  ) {
+    const num = issueNumber ? String(issueNumber) : '1';
+    return this.runIssueComplianceAudit(num, title || 'Compliance Check', body || '');
+  }
+
+  // Flat Route: Copilot Chat Query (called by page.tsx handleAskCopilot)
+  @Post('copilot/ask')
+  async copilotAsk(@Body('prompt') prompt?: string, @Body('query') query?: string) {
+    return this.chatWithTpmCopilot(prompt || query || '');
+  }
+
+  // Flat Route: Webhook Simulator (called by page.tsx handleSimulateWebhook)
+  @Post('webhook/simulate')
+  async simulateWebhookIncident(@Body() body: any) {
+    const preset = body?.preset || 'datadog_db_exhaustion';
+
+    const presetsMap: Record<string, any> = {
+      datadog_db_exhaustion: {
+        source: 'Datadog Inbound Webhook',
+        title: '[P0] Datadog: PostgreSQL Database Connection Pool Exhaustion on /api/v1/checkout',
+        message: 'CRITICAL: Database connection pool utilization exceeded 98% threshold for >3 minutes on primary RDS cluster. Multiple users experiencing 504 Gateway Timeout during checkout authorization. Customer impact > 15%, immediate pool expansion or traffic shedding required.',
+        severity: 'P0',
+        alertId: 'ALERT-9921',
+        service: 'billing-gateway',
+      },
+      pagerduty_auth_latency: {
+        source: 'PagerDuty Inbound Webhook',
+        title: '[P1] PagerDuty: Auth Gateway 504 Latency Spike on /oauth/token',
+        message: 'HIGH: p99 latency on auth-svc /oauth/token jumped from 45ms to 980ms across EU-central clusters. User session validation failure rate reaching 8.4%. Immediate cache warmup or replica scale-out recommended.',
+        severity: 'P1',
+        alertId: 'PD-58210',
+        service: 'auth-svc',
+      },
+      sentry_runtime_oom: {
+        source: 'Sentry Inbound Webhook',
+        title: '[P0] Sentry Alert: Worker Process Heap Out-of-Memory Crash (OOMKilled)',
+        message: 'CRITICAL: Worker process heap out-of-memory crash on background report export worker. Memory usage steadily grows by 150MB/hour until SIGKILL is triggered by Kubernetes OOMKilled controller.',
+        severity: 'P0',
+        alertId: 'SENTRY-4412',
+        service: 'report-worker',
+      },
+    };
+
+    const payload = presetsMap[preset] || body?.payload || body;
+    return this.handleInboundWebhook(payload);
+  }
+
+  // Add Comment on GitHub Issue (called by page.tsx handlePostDiffToGitHub / handlePublishRcaToGitHub)
+  @Post('issues/:number/comments')
+  async postIssueComment(
+    @Param('number') issueNumber: string,
+    @Body('body') body: string,
+  ) {
+    const num = parseInt(issueNumber, 10);
+    const comment = await this.integrationsService.addGitHubComment(num, body);
+    return {
+      success: true,
+      comment,
     };
   }
 

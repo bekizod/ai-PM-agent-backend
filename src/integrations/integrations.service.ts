@@ -435,6 +435,24 @@ export class IntegrationsService {
     }
   }
 
+  // 2i. GitHub API: Remove Collaborator from Repository
+  async removeRepoCollaborator(username: string) {
+    const owner = this.getRepoOwner();
+    const repo = this.getRepoName();
+    try {
+      await this.octokit.repos.removeCollaborator({
+        owner,
+        repo,
+        username,
+      });
+      this.logger.log(`Removed collaborator @${username} from ${owner}/${repo}`);
+      return { success: true };
+    } catch (error) {
+      this.logger.warn(`Failed to remove collaborator @${username}: ${error}`);
+      return { success: false, error: String(error) };
+    }
+  }
+
   // 3. Google Calendar API: Schedule Real Urgent P0 Triage Call
   async scheduleUrgentTriageMeeting(topic: string, summary: string) {
     try {

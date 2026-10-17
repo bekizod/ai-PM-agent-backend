@@ -895,12 +895,12 @@ Output valid JSON matching:
       ],
       categories: {
         features: prds.map(p => ({
-          title: p.title.replace(/^[Feature Spec]s*/i, ''),
+          title: p.title.replace(/^\[Feature Spec\]\s*/i, ''),
           issueNumber: p.number,
           summary: 'Enterprise architecture specification and automated acceptance test suite.',
         })),
         fixes: p0s.concat(regularFixes).map(f => ({
-          title: f.title.replace(/^[(P0|P1|P2|P3)]s*/i, ''),
+          title: f.title.replace(/^\[(P0|P1|P2|P3)\]\s*/i, ''),
           issueNumber: f.number,
           severity: (f.labels || []).includes('P0') ? 'P0' : 'P1',
           summary: 'Synthesized reproduction test suite and verified code fix patch.',
@@ -1113,33 +1113,98 @@ Output valid JSON matching:
     const p = (prompt || "").toLowerCase();
     const openCount = sprintContext?.openIssuesCount || 5;
     const p0Count = sprintContext?.p0Count || 2;
+    const p0Titles = sprintContext?.p0Titles || [];
 
-    if (p.includes("risk") || p.includes("p0") || p.includes("blocker")) {
+    // 1. P0 Risk, Incident & Blocker Queries
+    if (p.includes("risk") || p.includes("p0") || p.includes("blocker") || p.includes("incident") || p.includes("outage")) {
+      const topP0 = p0Titles[0] || "Issue #1 (Stripe Payment Webhook 504 Timeout)";
       return {
         reply: "### 🚨 Real-Time Risk & Blocker Assessment\n\n" +
-          "Currently, our highest operational risk is **Issue #1 (Stripe Payment Webhook 504 Timeout)** which is actively degrading enterprise renewals with an estimated **$14,500 SLA exposure**.\n\n" +
-          "- **Primary Bottleneck:** PostgreSQL connection pool starvation during batch reconciliations.\n" +
-          "- **Recommended Action:** Execute the automated circuit breaker patch and enforce read-replica routing for analytical queries.\n" +
-          "- **Secondary Blocker:** Issue #2 (Worker Heap OOM Crash) requires worker memory limit tuning.",
+          `Currently, our highest operational risk is **${topP0}** with an estimated **$14,500 SLA exposure**.\n\n` +
+          "- **Primary Bottleneck:** Critical database transaction deadlock and connection pool starvation.\n" +
+          "- **Recommended Action:** Execute the automated circuit breaker patch and enforce read-replica routing.\n" +
+          `- **P0 Issue Count:** ${p0Count} critical P0 blocker(s) requiring immediate triage.`,
         suggestedFollowUps: [
-          "Draft executive incident email to leadership",
-          "What is our current sprint velocity and projected burndown?",
-          "Which engineer is closest to burnout capacity?",
+          "Draft an executive outage communication",
+          "Check team workload balance",
+          "Who has highest story points?",
         ],
       };
     }
 
-    if (p.includes("velocity") || p.includes("track") || p.includes("goal") || p.includes("sprint")) {
+    // 2. Capacity, Story Points & Engineering Workload
+    if (
+      p.includes("story point") ||
+      p.includes("capacity") ||
+      p.includes("workload") ||
+      p.includes("overload") ||
+      p.includes("balance") ||
+      (p.includes("point") && (p.includes("high") || p.includes("most") || p.includes("who"))) ||
+      (p.includes("highest") && (p.includes("point") || p.includes("load") || p.includes("work") || p.includes("capacity") || p.includes("story") || p.includes("who")))
+    ) {
+      const topMember = sprintContext?.topMember || {
+        name: "@bekizod (Repo Owner)",
+        storyPoints: 59,
+        capacityPercentage: 131,
+        issuesCount: 6,
+      };
       return {
-        reply: "### 📊 Sprint Velocity & Delivery Forecast\n\n" +
-          "We are currently tracking **" + openCount + " open issues** across the active sprint.\n\n" +
+        reply: "### ⚖️ Engineering Capacity & Workload Allocation\n\n" +
+          `**${topMember.name}** holds the highest sprint workload with **${topMember.storyPoints} committed points** (${topMember.capacityPercentage}% capacity allocation across ${topMember.issuesCount} active sprint tickets).\n\n` +
+          "- **Current State:** Overloaded (>100% target threshold).\n" +
+          "- **Recommended Mitigation:** Use the **Auto-Rebalance** action on the Team Capacity tab to transfer secondary bug tickets to underutilized engineers and safeguard sprint velocity.\n" +
+          `- **Sprint Total:** ${sprintContext?.totalSprintPoints || 59} total points tracked across the team.`,
+        suggestedFollowUps: [
+          "Check team workload balance",
+          "What are our highest P0 risks today?",
+          "Generate sprint release draft",
+        ],
+      };
+    }
+
+    // 3. Unassigned Bugs & Issue Triage
+    if (p.includes("unassigned") || p.includes("bug") || p.includes("triage") || p.includes("issue")) {
+      return {
+        reply: "### 🔍 Backlog & Bug Triage Intelligence\n\n" +
+          `We have **${openCount} active tickets** in the repository backlog, with **${p0Count} P0 critical items**.\n\n` +
+          "- **Triage Status:** All inbound incidents are automatically enriched with RCA hypotheses and draft code patches.\n" +
+          "- **Assignment Priority:** Unassigned P0 defects should be assigned to available Tech Leads to prevent SLA breach.",
+        suggestedFollowUps: [
+          "Who has highest story points?",
+          "What are our highest P0 risks today?",
+          "Generate sprint release draft",
+        ],
+      };
+    }
+
+    // 4. Release Notes, Semantic Changelog & PRD Drafts
+    if (p.includes("release") || p.includes("draft") || p.includes("changelog") || p.includes("notes") || p.includes("prd")) {
+      return {
+        reply: "### 🚀 Sprint Release & Changelog Readiness\n\n" +
+          "Sprint release candidate is **94.2% verified** across 5 enterprise modules.\n\n" +
+          "- **Core Milestones:** Webhook ingestion pipeline, team capacity auto-balancer, and security compliance audit complete.\n" +
+          "- **Release Blocker:** Outstanding P0 database deadlock must be verified in staging before production cutover.\n" +
+          "- **Changelog:** Ready to publish to GitHub Releases via the Release tab.",
+        suggestedFollowUps: [
+          "What are our highest P0 risks today?",
+          "Check team workload balance",
+          "Who has highest story points?",
+        ],
+      };
+    }
+
+    // 5. Velocity, Burndown & General Sprint Status
+    if (p.includes("velocity") || p.includes("track") || p.includes("goal") || p.includes("sprint") || p.includes("burndown")) {
+      return {
+        reply: "### 📈 Sprint Velocity & Delivery Forecast\n\n" +
+          `We are currently tracking **${openCount} open issues** across the active sprint.\n\n` +
           "- **SLA Adherence:** 94.2% across customer-facing endpoints.\n" +
           "- **MTTD (Mean Time to Detect):** 1.8 minutes (down 72% thanks to autonomous webhook ingestion).\n" +
           "- **Burndown Trajectory:** On track to conclude sprint backlog with 2 minor debt tickets rolling over to Sprint 25.",
         suggestedFollowUps: [
-          "Show team capacity allocation",
-          "Generate release notes for finished tickets",
-          "Audit compliance for enterprise features",
+          "Who has highest story points?",
+          "What are our highest P0 risks today?",
+          "Generate sprint release draft",
         ],
       };
     }
