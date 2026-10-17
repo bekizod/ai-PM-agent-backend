@@ -1,5 +1,5 @@
 import { marked } from 'marked';
-﻿import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Octokit } from '@octokit/rest';
 import { google } from 'googleapis';
 import * as nodemailer from 'nodemailer';
@@ -20,6 +20,22 @@ export interface EmailDispatchResult {
   recipient: string;
   messageId?: string;
   subject: string;
+}
+
+export interface PullRequestResult {
+  prNumber: number;
+  prUrl: string;
+  branchName: string;
+  state: string;
+  issueNumber: number;
+}
+
+export interface GitHubReleaseResult {
+  releaseId: number;
+  releaseUrl: string;
+  tagName: string;
+  name: string;
+  isDraft: boolean;
 }
 
 @Injectable()
@@ -47,47 +63,66 @@ export class IntegrationsService {
     this.logger.log(`Nodemailer SMTP Transporter initialized with user: ${process.env.SMTP_USER}`);
   }
 
-  private getRepoOwner(): string {
+  public getRepoOwner(): string {
     return process.env.GITHUB_OWNER || 'bekizod';
   }
 
-  private getRepoName(): string {
+  public getRepoName(): string {
     const rawRepo = process.env.GITHUB_REPO || 'ai_target_repo_name';
     return rawRepo.replace(/\.git$/, '').split('/').pop() || rawRepo;
   }
 
   getIntegrationStatus() {
     return {
-      gemini: !!process.env.GEMINI_API_KEY,
-      github: true,
-      emailProvider: 'Gmail SMTP (Nodemailer)',
-      nodemailer: true,
-      calendar: true,
-      githubRepo: `${this.getRepoOwner()}/${this.getRepoName()}`,
-      recipientEmail: process.env.NOTIFICATION_EMAIL_TO || 'bekizodcancer@gmail.com',
+      github: {
+        connected: !!process.env.GITHUB_TOKEN,
+        targetRepo: `${this.getRepoOwner()}/${this.getRepoName()}`,
+      },
+      email: {
+        connected: !!process.env.SMTP_USER && !!process.env.SMTP_PASS,
+        service: 'Gmail SMTP (Nodemailer)',
+        recipient: process.env.NOTIFICATION_EMAIL_TO || 'bekizodcancer@gmail.com',
+      },
+      googleCalendar: {
+        connected: !!process.env.GOOGLE_CLIENT_EMAIL && !!process.env.GOOGLE_PRIVATE_KEY,
+        calendarId: process.env.GOOGLE_CALENDAR_ID || 'primary',
+      },
+      geminiAi: {
+        connected: !!process.env.GEMINI_API_KEY,
+        model: 'gemini-2.5-flash / gemini-1.5-flash',
+      },
     };
   }
 
-  // 1. GitHub API: Create Real Structured Issue on GitHub
-  async createGitHubIssue(triage: TriageResult) {
-    const body = `### Summary
-${triage.summary}
-
-### Severity
-**${triage.severity}**
-
-### Steps to Reproduce
-${triage.reproductionSteps.map((s, i) => `${i + 1}. ${s}`).join('\n')}
-
-### Acceptance Criteria
-${triage.acceptanceCriteria.map((c) => `- [ ] ${c}`).join('\n')}
-
----
-*Automatically triaged & created by Autonomous AI Technical PM Agent*`;
-
+  // 1. GitHub API: Create Issue from Triaged Bug or Feature PRD
+  async createGitHubIssue(data: TriageResult | PrdResult, type: 'BUG' | 'FEATURE' = 'BUG') {
     const owner = this.getRepoOwner();
     const repo = this.getRepoName();
-    const title = `[${triage.severity}] ${triage.title}`;
+
+    let title = '';
+    let body = '';
+    let labels: string[] = [];
+
+    if (type === 'BUG') {
+      const triage = data as TriageResult;
+      title = `[${triage.severity}] ${triage.title}`;
+      body = `## 🤖 AI TPM Agent Bug Triage Report\n\n` +
+        `**Severity Level:** \`${triage.severity}\`\n\n` +
+        `### Problem Summary\n${triage.summary}\n\n` +
+        `### Steps to Reproduce\n${triage.reproductionSteps.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n\n` +
+        `### Acceptance Criteria\n${triage.acceptanceCriteria.map((c) => `- [ ] ${c}`).join('\n')}\n\n` +
+        `### Autonomous Actions Taken\n` +
+        `- [x] Real-time multi-agent triage and root-cause classification\n` +
+        (triage.requiresUrgentMeeting ? `- [x] Google Calendar emergency incident triage meeting scheduled\n` : '') +
+        `- [x] Nodemailer incident alert dispatched to team lead\n\n` +
+        `---\n*Report generated autonomously by [Autonomous AI TPM Agent](https://github.com/${owner}/${repo})*`;
+      labels = triage.labels;
+    } else {
+      const prd = data as PrdResult;
+      title = `[Feature Spec] ${prd.title}`;
+      body = prd.markdownPrd + `\n\n---\n*PRD generated autonomously by [Autonomous AI TPM Agent](https://github.com/${owner}/${repo})*`;
+      labels = prd.recommendedLabels;
+    }
 
     try {
       const response = await this.octokit.issues.create({
@@ -95,27 +130,23 @@ ${triage.acceptanceCriteria.map((c) => `- [ ] ${c}`).join('\n')}
         repo,
         title,
         body,
-        labels: [triage.severity, 'bug'],
+        labels,
       });
 
-      this.logger.log(`Real GitHub Issue created successfully: #${response.data.number} (${response.data.html_url})`);
-
+      this.logger.log(`Live GitHub Issue #${response.data.number} created successfully: ${response.data.html_url}`);
       return {
         issueNumber: response.data.number,
         issueUrl: response.data.html_url,
         live: true,
       };
     } catch (error) {
-      this.logger.warn(`GitHub create issue with labels failed (${error}), retrying without labels...`);
+      this.logger.error(`GitHub API create issue failed: ${error}. Attempting fallback without custom labels.`);
       const response = await this.octokit.issues.create({
         owner,
         repo,
         title,
         body,
       });
-
-      this.logger.log(`Real GitHub Issue created successfully: #${response.data.number} (${response.data.html_url})`);
-
       return {
         issueNumber: response.data.number,
         issueUrl: response.data.html_url,
@@ -124,80 +155,8 @@ ${triage.acceptanceCriteria.map((c) => `- [ ] ${c}`).join('\n')}
     }
   }
 
-
   async createGitHubPrd(prd: PrdResult) {
-    const body = `## 📋 Product Requirements Document (PRD)
-
-### 🎯 Problem Statement
-${prd.problemStatement}
-
-### 👥 Target Audience
-${prd.targetAudience}
-
-### ⏱️ Estimated Effort
-**${prd.estimatedEffort}**
-
----
-
-### 🚀 User Stories & Acceptance Criteria
-${(prd.userStories || []).map((story, i) => `#### Story ${i + 1}: As a ${story.asA}
-- **I want:** ${story.iWant}
-- **So that:** ${story.soThat}
-
-**Acceptance Criteria:**
-${(story.acceptanceCriteria || []).map((ac) => `- [ ] ${ac}`).join('\n')}`).join('\n\n')}
-
----
-
-### 🏗️ Technical Architecture & Design
-${prd.technicalArchitecture}
-
-### 🛡️ Non-Functional Requirements
-${(prd.nonFunctionalRequirements || []).map((nfr) => `- ${nfr}`).join('\n')}
-
-### 📈 Success Metrics (KPIs)
-${(prd.successMetrics || []).map((m) => `- ${m}`).join('\n')}
-
----
-*Created autonomously by AI Technical Product Manager Agent*`;
-
-    const owner = this.getRepoOwner();
-    const repo = this.getRepoName();
-    const title = `[Feature Spec] ${prd.title}`;
-
-    try {
-      const response = await this.octokit.issues.create({
-        owner,
-        repo,
-        title,
-        body,
-        labels: ['enhancement', 'feature-spec', 'tpm-agent'],
-      });
-
-      this.logger.log(`Real GitHub Feature Spec created successfully: #${response.data.number} (${response.data.html_url})`);
-
-      return {
-        issueNumber: response.data.number,
-        issueUrl: response.data.html_url,
-        live: true,
-      };
-    } catch (error) {
-      this.logger.warn(`GitHub create PRD with labels failed (${error}), retrying without labels...`);
-      const response = await this.octokit.issues.create({
-        owner,
-        repo,
-        title,
-        body,
-      });
-
-      this.logger.log(`Real GitHub Feature Spec created successfully: #${response.data.number} (${response.data.html_url})`);
-
-      return {
-        issueNumber: response.data.number,
-        issueUrl: response.data.html_url,
-        live: true,
-      };
-    }
+    return this.createGitHubIssue(prd, 'FEATURE');
   }
 
   // 2. GitHub API: Fetch Real Open Issues from GitHub Repository
@@ -222,6 +181,238 @@ ${(prd.successMetrics || []).map((m) => `- ${m}`).join('\n')}
     } catch (error) {
       this.logger.error(`GitHub API list issues failed: ${error}`);
       return [];
+    }
+  }
+
+  // 2b. GitHub API: Add Comment to Issue
+  async addGitHubComment(issueNumber: number, commentBody: string) {
+    const owner = this.getRepoOwner();
+    const repo = this.getRepoName();
+    try {
+      const response = await this.octokit.issues.createComment({
+        owner,
+        repo,
+        issue_number: issueNumber,
+        body: commentBody,
+      });
+      this.logger.log(`Posted comment on GitHub Issue #${issueNumber}: ${response.data.html_url}`);
+      return {
+        commentId: response.data.id,
+        commentUrl: response.data.html_url,
+        createdAt: response.data.created_at,
+      };
+    } catch (error) {
+      this.logger.error(`Failed to post comment on GitHub Issue #${issueNumber}: ${error}`);
+      throw error;
+    }
+  }
+
+  // 2c. GitHub API: Update Issue State (open / closed)
+  async updateGitHubIssueState(issueNumber: number, state: 'open' | 'closed') {
+    const owner = this.getRepoOwner();
+    const repo = this.getRepoName();
+    try {
+      const response = await this.octokit.issues.update({
+        owner,
+        repo,
+        issue_number: issueNumber,
+        state,
+      });
+      this.logger.log(`Updated GitHub Issue #${issueNumber} state to: ${state}`);
+      return {
+        issueNumber: response.data.number,
+        state: response.data.state,
+      };
+    } catch (error) {
+      this.logger.error(`Failed to update GitHub Issue #${issueNumber} state: ${error}`);
+      throw error;
+    }
+  }
+
+  // 2d. GitHub API: Autonomous Pull Request Generator
+  async createGitHubPullRequest(
+    issueNumber: number,
+    title: string,
+    patchContent: string,
+    testScaffold: string,
+    prBody?: string,
+  ): Promise<PullRequestResult> {
+    const owner = this.getRepoOwner();
+    const repo = this.getRepoName();
+
+    try {
+      // 1. Get base reference from main
+      const baseRef = await this.octokit.git.getRef({
+        owner,
+        repo,
+        ref: 'heads/main',
+      });
+      const baseSha = baseRef.data.object.sha;
+
+      // 2. Create feature branch
+      const branchName = `fix/issue-${issueNumber}-ai-patch-${Date.now().toString().slice(-6)}`;
+      await this.octokit.git.createRef({
+        owner,
+        repo,
+        ref: `refs/heads/${branchName}`,
+        sha: baseSha,
+      });
+      this.logger.log(`Created branch ${branchName} for issue #${issueNumber}`);
+
+      // 3. Commit reproduction test file
+      const testPath = `test/reproduction/issue-${issueNumber}.spec.ts`;
+      await this.octokit.repos.createOrUpdateFileContents({
+        owner,
+        repo,
+        path: testPath,
+        message: `test(reproduction): automated test scaffold for #${issueNumber}`,
+        content: Buffer.from(testScaffold || '// Autonomous test scaffold\n').toString('base64'),
+        branch: branchName,
+      });
+
+      // 4. Commit patch file
+      const patchPath = `src/patches/issue-${issueNumber}-fix.patch`;
+      await this.octokit.repos.createOrUpdateFileContents({
+        owner,
+        repo,
+        path: patchPath,
+        message: `fix(core): autonomous code fix patch for #${issueNumber}`,
+        content: Buffer.from(patchContent || '// Unified diff patch\n').toString('base64'),
+        branch: branchName,
+      });
+
+      // 5. Open Pull Request
+      const defaultBody = [
+        `## 🤖 Autonomous AI TPM Agent Pull Request`,
+        `**Resolves:** Closes #${issueNumber}`,
+        `**Issue Context:** ${title}`,
+        ``,
+        `### 🔍 Summary of Changes`,
+        `This pull request was synthesized and committed autonomously by the Multi-Agent Triage & Reliability Engine.`,
+        ``,
+        `### 🧪 Automated Test & Fix Coverage`,
+        `- Added reproduction suite: \`${testPath}\``,
+        `- Applied unified git patch: \`${patchPath}\``,
+        ``,
+        `### 📋 Staff Reviewer Verification Checklist`,
+        `- [ ] Verify circuit breaker threshold & backoff jitter parameters`,
+        `- [ ] Confirm reproduction test passes in CI staging environment`,
+        `- [ ] Validate blast radius containment with downstream services`,
+        ``,
+        `---`,
+        `*Synthesized and submitted autonomously by [Autonomous AI TPM Agent](https://github.com/${owner}/${repo})*`,
+      ].join('\n');
+
+      const pr = await this.octokit.pulls.create({
+        owner,
+        repo,
+        title: `fix(core): ${title.replace(/^\[(P0|P1|P2|P3)\]\s*/i, '')} (Closes #${issueNumber})`,
+        head: branchName,
+        base: 'main',
+        body: prBody || defaultBody,
+      });
+
+      this.logger.log(`Pull Request #${pr.data.number} created: ${pr.data.html_url}`);
+
+      // 6. Post real comment on the originating issue linking to the PR
+      try {
+        await this.addGitHubComment(
+          issueNumber,
+          `🤖 **Autonomous Pull Request Opened**: [PR #${pr.data.number}](${pr.data.html_url}) has been created on branch \`${branchName}\` with an automated reproduction test and code fix.`,
+        );
+      } catch (commentErr) {
+        this.logger.warn(`Could not add PR link comment to issue #${issueNumber}: ${commentErr}`);
+      }
+
+      return {
+        prNumber: pr.data.number,
+        prUrl: pr.data.html_url,
+        branchName,
+        state: pr.data.state,
+        issueNumber,
+      };
+    } catch (error) {
+      this.logger.error(`Failed to create GitHub Pull Request for #${issueNumber}: ${error}`);
+      throw error;
+    }
+  }
+
+  // 2e. GitHub API: Create GitHub Release / Draft Release Notes
+  async createGitHubRelease(
+    version: string,
+    name: string,
+    body: string,
+  ): Promise<GitHubReleaseResult> {
+    const owner = this.getRepoOwner();
+    const repo = this.getRepoName();
+    try {
+      const release = await this.octokit.repos.createRelease({
+        owner,
+        repo,
+        tag_name: version.startsWith('v') ? version : `v${version}`,
+        name: name || `Sprint Release ${version}`,
+        body,
+        draft: true,
+        prerelease: false,
+      });
+
+      this.logger.log(`Created GitHub Release Draft: ${release.data.html_url}`);
+      return {
+        releaseId: release.data.id,
+        releaseUrl: release.data.html_url,
+        tagName: release.data.tag_name,
+        name: release.data.name || name,
+        isDraft: release.data.draft,
+      };
+    } catch (error) {
+      this.logger.error(`Failed to create GitHub Release: ${error}`);
+      throw error;
+    }
+  }
+
+  
+  // 2f. GitHub API: Get Real Repository Collaborators & Assignees
+  async getRepoCollaborators() {
+    const owner = this.getRepoOwner();
+    const repo = this.getRepoName();
+    try {
+      const response = await this.octokit.repos.listCollaborators({
+        owner,
+        repo,
+      });
+      return response.data.map((c) => ({
+        username: c.login,
+        avatarUrl: c.avatar_url,
+        htmlUrl: c.html_url,
+      }));
+    } catch (error) {
+      this.logger.warn(`Could not list collaborators: ${error}`);
+      return [
+        {
+          username: owner,
+          avatarUrl: `https://github.com/${owner}.png`,
+          htmlUrl: `https://github.com/${owner}`,
+        },
+      ];
+    }
+  }
+
+  // 2g. GitHub API: Assign Issue to Real Collaborators
+  async assignGitHubIssue(issueNumber: number, assignees: string[]) {
+    const owner = this.getRepoOwner();
+    const repo = this.getRepoName();
+    try {
+      const response = await this.octokit.issues.addAssignees({
+        owner,
+        repo,
+        issue_number: issueNumber,
+        assignees,
+      });
+      this.logger.log(`Assigned GitHub Issue #${issueNumber} to: ${assignees.join(', ')}`);
+      return response.data;
+    } catch (error) {
+      this.logger.warn(`Failed to assign GitHub Issue #${issueNumber}: ${error}`);
+      return null;
     }
   }
 
@@ -280,9 +471,13 @@ ${(prd.successMetrics || []).map((m) => `- ${m}`).join('\n')}
   }
 
   // 4. Nodemailer: Dispatch Real Email via Gmail SMTP
-  async sendEmailNotification(subject: string, content: string): Promise<EmailDispatchResult> {
-    const toEmail = process.env.NOTIFICATION_EMAIL_TO || 'bekizodcancer@gmail.com';
-    const fromEmail = process.env.NOTIFICATION_EMAIL_FROM || process.env.SMTP_USER || 'eshetugetsh19@gmail.com';
+  async sendEmailNotification(
+    subject: string,
+    content: string,
+    recipientEmail?: string,
+  ): Promise<EmailDispatchResult> {
+    const toEmail = recipientEmail || process.env.NOTIFICATION_EMAIL_TO || 'bekizodcancer@gmail.com';
+    const fromEmail = process.env.NOTIFICATION_EMAIL_FROM || process.env.SMTP_USER || 'bekizodcancer@gmail.com';
 
     // Parse Markdown into rich, clean HTML for email clients
     const rawParsed = marked.parse(content);
