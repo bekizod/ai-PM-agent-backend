@@ -674,9 +674,9 @@ ${scaffold.technicalTradeoffs}
     };
   }
 
-  // 11b. Team Member Management: Add Real Person
+  // 11b. Team Member Management: Add Real Person & Automatically Invite as GitHub Collaborator
   @Post('team/members')
-  addTeamMember(
+  async addTeamMember(
     @Body('name') name: string,
     @Body('role') role: string,
     @Body('githubUsername') githubUsername: string,
@@ -684,22 +684,63 @@ ${scaffold.technicalTradeoffs}
     @Body('maxCapacityPoints') maxCapacityPoints?: number,
     @Body('primaryComponent') primaryComponent?: string,
   ) {
+    const cleanUsername = (githubUsername || '').trim().replace(/^@/, '');
     const newMember = {
       id: `member-${Date.now()}`,
-      name: name || 'New Team Member',
+      name: name || (cleanUsername ? `@${cleanUsername}` : 'New Team Member'),
       role: role || 'Software Engineer',
-      githubUsername: githubUsername || '',
-      avatarUrl: githubUsername
-        ? `https://github.com/${githubUsername}.png`
+      githubUsername: cleanUsername,
+      avatarUrl: cleanUsername
+        ? `https://github.com/${cleanUsername}.png`
         : `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(name || 'Member')}`,
       email: email || '',
-      maxCapacityPoints: maxCapacityPoints || 15,
+      maxCapacityPoints: Number(maxCapacityPoints) || 15,
       primaryComponent: primaryComponent || 'Core Services',
     };
 
     this.liveTeamMembers.push(newMember);
-    this.logger.log(`Added live team member: ${newMember.name} (${newMember.role})`);
-    return { success: true, member: newMember, totalMembers: this.liveTeamMembers.length };
+
+    // Automatically send an official GitHub collaborator invite directly from the dashboard!
+    let gitHubInviteResult: any = null;
+    if (cleanUsername) {
+      gitHubInviteResult = await this.integrationsService.addRepoCollaborator(cleanUsername, 'push');
+    }
+
+    // Send welcome email notification informing them they will receive tasks via email
+    let emailResult: any = null;
+    const recipient = email || process.env.NOTIFICATION_EMAIL_TO;
+    if (recipient) {
+      const repoOwner = this.integrationsService.getRepoOwner();
+      const repoName = this.integrationsService.getRepoName();
+      const welcomeSubject = `[SprintOps AI] Added as Collaborator on ${repoOwner}/${repoName}`;
+      const welcomeContent = `### Welcome to the Sprint Team!\n\n` +
+        `Hello **${newMember.name}**,\n\n` +
+        `You have been added as an engineering collaborator on repository **\`${repoOwner}/${repoName}\`** by repository owner **@${repoOwner}**.\n\n` +
+        `- **Role**: ${newMember.role}\n` +
+        `- **Focus Area**: ${newMember.primaryComponent}\n` +
+        `- **GitHub Account**: @${cleanUsername || 'N/A'}\n` +
+        `- **GitHub Repository**: [https://github.com/${repoOwner}/${repoName}](https://github.com/${repoOwner}/${repoName})\n\n` +
+        `**Notification Policy**: You will receive real-time email notifications whenever issues, sprint tickets, or incident triage tasks are allocated to you. All automation is managed directly by the TPM Lead.`;
+
+      try {
+        emailResult = await this.integrationsService.sendEmailNotification(
+          welcomeSubject,
+          welcomeContent,
+          recipient,
+        );
+      } catch (err) {
+        this.logger.warn(`Failed to send welcome email to ${recipient}: ${err}`);
+      }
+    }
+
+    this.logger.log(`Added live team member: ${newMember.name} (@${cleanUsername})`);
+    return {
+      success: true,
+      member: newMember,
+      gitHubInviteResult,
+      emailResult,
+      totalMembers: this.liveTeamMembers.length,
+    };
   }
 
   // 11c. Team Member Management: Remove Member

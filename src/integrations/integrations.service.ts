@@ -416,6 +416,25 @@ export class IntegrationsService {
     }
   }
 
+  // 2h. GitHub API: Invite / Add Collaborator to Repository directly from Dashboard
+  async addRepoCollaborator(username: string, permission: 'push' | 'pull' | 'admin' = 'push') {
+    const owner = this.getRepoOwner();
+    const repo = this.getRepoName();
+    try {
+      const response = await this.octokit.repos.addCollaborator({
+        owner,
+        repo,
+        username,
+        permission,
+      });
+      this.logger.log(`Invited @${username} as collaborator to ${owner}/${repo}`);
+      return { success: true, data: response.data };
+    } catch (error) {
+      this.logger.warn(`Failed to invite collaborator @${username}: ${error}`);
+      return { success: false, error: String(error) };
+    }
+  }
+
   // 3. Google Calendar API: Schedule Real Urgent P0 Triage Call
   async scheduleUrgentTriageMeeting(topic: string, summary: string) {
     try {
